@@ -1,0 +1,55 @@
+// =================== CS251 DEX Project =================== // 
+//                      Design Document                      //
+//                      [Your Name Here]                     //
+// ========================================================= //  
+
+1. Explain why adding and removing liquidity to your exchange does not change the exchange rate.
+
+In our constant-product automated market maker (AMM), the spot exchange rate between ETH and the ERC-20 token (STC) is determined by the ratio of their pool reserves: `eth_reserves / token_reserves` (price of 1 token in ETH) and `token_reserves / eth_reserves` (price of 1 ETH in tokens).
+
+When a liquidity provider (LP) adds liquidity by supplying `Delta_x` ETH, `addLiquidity` requires them to deposit `Delta_y` tokens in the exact current reserve ratio:
+`Delta_y / Delta_x = token_reserves / eth_reserves`.
+Therefore, the new reserve ratio after adding liquidity is:
+`(token_reserves + Delta_y) / (eth_reserves + Delta_x) = token_reserves * (1 + Delta_x / eth_reserves) / (eth_reserves * (1 + Delta_x / eth_reserves)) = token_reserves / eth_reserves`.
+
+Similarly, when an LP removes a fraction `f = shares_burned / total_shares` of the pool in `removeLiquidity` or `removeAllLiquidity`, they withdraw both `f * eth_reserves` ETH and `f * token_reserves` tokens simultaneously. The new ratio is:
+`((1 - f) * token_reserves) / ((1 - f) * eth_reserves) = token_reserves / eth_reserves`.
+
+Because both reserves always scale by the exact same factor (`(1 + f)` when adding and `(1 - f)` when removing), their ratio—and thus the exchange rate—remains unchanged (aside from negligible 1-unit integer rounding because tokens are indivisible). While `k = eth_reserves * token_reserves` changes, the relative price does not.
+
+
+2. Explain your scheme for rewarding liquidity providers and justify the design decisions you made. How does it satisfy the liquidity rewards requirements outlined in Section 7?
+
+We implemented the Extra Credit per-swap proportional fee distribution scheme (Section 7.1) using global accumulated-fee-per-share checkpoints (`acc_eth_fee_per_share` and `acc_token_fee_per_share`, scaled by `REWARD_PRECISION = 10^24`) combined with per-LP reward debts (`eth_reward_debt`, `token_reward_debt`) and pending reward balances (`pending_eth_rewards_scaled`, `pending_token_rewards_scaled`):
+
+- Fee charging & currency separation (Requirements 1 & 2): Every swap charges `swap_fee_numerator / swap_fee_denominator` (3%) strictly from the currency being traded in (`eth_fee` in `swapETHForTokens` and `token_fee` in `swapTokensForETH`).
+- Preserving the exchange rate (Requirement 3): Fees are accumulated in separate `eth_fee_reserves` and `token_fee_reserves` pools and are never added to `eth_reserves` or `token_reserves`. Only `amount_in - fee` enters the constant-product swap calculation, so the swap fee does not distort the pool's AMM exchange rate.
+- Fair time-weighted ownership (Section 7.1 Extra Credit): On each swap, the fee is divided by `total_shares` at the time of the swap and added to `acc_eth_fee_per_share` or `acc_token_fee_per_share`. When an LP joins or adds shares, their previous pending rewards are snapshotted via `_updateRewards(msg.sender)` and their `reward_debt` is set to `lps[msg.sender] * acc_fee_per_share`. Thus, an LP can only earn fees from swaps that occur while they hold shares, and cannot claim fees collected before they entered.
+- Claiming without extra steps or per-swap payouts (Requirement 5): Fees remain inside the contract during swaps (avoiding expensive transfers on every swap) and are automatically computed and sent to the LP in the same transaction when they call `removeLiquidity` or `removeAllLiquidity`.
+
+
+3. Describe at least one method you used to minimize your exchange contract's gas usage. Why was this method effective?
+
+1) O(1) Fee Accumulator Pattern instead of O(N) LP Array Iteration:
+Instead of iterating over the `lp_providers` array on every swap to credit each LP individually (which costs O(N) gas per swap and risks hitting the block gas limit as the number of LPs grows), we maintain two global cumulative scalars (`acc_eth_fee_per_share` and `acc_token_fee_per_share`) and update only two storage slots per swap in constant O(1) time. Each LP's accrued rewards are computed lazily only when that LP calls `addLiquidity`, `removeLiquidity`, or `removeAllLiquidity`. This reduces swap gas cost from O(N) storage writes down to O(1) regardless of how many LPs are in the pool, and eliminates array maintenance (`lp_providers` push/swap-and-pop).
+
+2) Minimizing Storage Writes (SSTORE) in Swaps & Liquidity Operations:
+Intermediate values (such as `current_exchange_rate`, `eth_after_fee`, `new_eth_reserves`, `tokens_out`, and `shares_added`) are computed in memory/stack local variables rather than repeatedly reading/writing storage slots. Additionally, `REWARD_PRECISION` is declared as a `constant` (inlined into bytecode rather than occupying an `SLOAD` storage slot), and `k` is only updated during `addLiquidity`, `removeLiquidity`, and `removeAllLiquidity`—never during swaps.
+
+
+4. Optional Feedback:
+4a. How much time did you spend on the assignment?
+
+N/A
+
+4b. What is one thing that would have been useful to know before starting the assignment?
+
+N/A
+
+4c. If you could change one with about this assignment, what would you change?
+
+N/A
+
+4d. Please feel free to include any other feedback you may have below.
+
+N/A
